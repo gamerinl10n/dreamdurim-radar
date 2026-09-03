@@ -128,6 +128,7 @@ button {
 
 .brand-lockup,
 .system-state,
+.topbar-actions,
 .job-kicker,
 .source-row,
 .decision-actions {
@@ -182,6 +183,34 @@ button {
   border-radius: 50%;
   background: #37e39f;
   box-shadow: 0 0 12px #37e39f;
+}
+
+.topbar-actions {
+  gap: 0.9rem;
+}
+
+.system-state.is-error > span {
+  background: #ff8d82;
+  box-shadow: 0 0 12px rgba(255, 141, 130, 0.72);
+}
+
+.system-notice {
+  padding: 0.65rem 3vw;
+  border-bottom: 1px solid rgba(117, 171, 152, 0.18);
+  color: #bcd2ca;
+  background: rgba(25, 63, 53, 0.58);
+  font-size: 0.82rem;
+  text-align: right;
+}
+
+.spin {
+  animation: radar-spin 0.9s linear infinite;
+}
+
+@keyframes radar-spin {
+  to {
+    transform: rotate(360deg);
+  }
 }
 
 .workspace {
@@ -565,6 +594,10 @@ button {
 
   .system-state {
     display: none;
+  }
+
+  .topbar-actions button {
+    padding-inline: 0.65rem;
   }
 
   .review-panel {

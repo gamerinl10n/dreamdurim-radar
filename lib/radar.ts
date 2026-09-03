@@ -16,6 +16,12 @@ export const TARGET_KEYWORDS = [
   "海外运营",
   "韩国市场",
   "韩国运营",
+  "현지화",
+  "로컬라이제이션",
+  "통역",
+  "중국어",
+  "해외운영",
+  "글로벌",
 ] as const;
 
 export type Country = "KR" | "CN" | "REMOTE";
@@ -35,6 +41,9 @@ export interface JobCandidate {
   matchedKeywords: string[];
   score: number;
   status: ReviewStatus;
+  deadline?: string | null;
+  sourceUrl?: string;
+  persisted?: boolean;
 }
 
 export function gradeForScore(score: number): "S" | "A" | "B" | "C" {
