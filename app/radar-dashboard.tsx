@@ -4,12 +4,14 @@ import {
   ArrowUpRight,
   Check,
   Clock3,
+  LoaderCircle,
   Radar,
+  RefreshCw,
   ScanSearch,
   ShieldCheck,
   X,
 } from "lucide-react";
-import { useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -17,8 +19,29 @@ import { Progress } from "@/components/ui/progress";
 import {
   gradeForScore,
   sampleCandidates,
+  type JobCandidate,
   type ReviewStatus,
 } from "@/lib/radar";
+
+type DataMode = "loading" | "live" | "sample" | "error";
+
+interface SystemStatus {
+  storageConfigured: boolean;
+  saraminConfigured: boolean;
+}
+
+interface CollectionRun {
+  status: "running" | "succeeded" | "failed";
+  storedCount: number;
+  mergedCount: number;
+  finishedAt: string | null;
+}
+
+interface JobsResponse {
+  items: JobCandidate[];
+  lastRun: CollectionRun | null;
+  error?: string;
+}
 
 const decisionCopy: Record<ReviewStatus, string> = {
   pending: "검토 대기",
@@ -44,9 +67,66 @@ function Metric({
   );
 }
 
+function collectionTime(lastRun: CollectionRun | null): string {
+  if (!lastRun?.finishedAt) return "수집 이력 없음";
+  return new Intl.DateTimeFormat("ko-KR", {
+    month: "numeric",
+    day: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+  }).format(new Date(lastRun.finishedAt));
+}
+
 export function RadarDashboard() {
-  const [candidates, setCandidates] = useState(sampleCandidates);
+  const [candidates, setCandidates] = useState<JobCandidate[]>(sampleCandidates);
   const [activeId, setActiveId] = useState(sampleCandidates[0].id);
+  const [dataMode, setDataMode] = useState<DataMode>("loading");
+  const [system, setSystem] = useState<SystemStatus>({
+    storageConfigured: false,
+    saraminConfigured: false,
+  });
+  const [lastRun, setLastRun] = useState<CollectionRun | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
+  const [isCollecting, setIsCollecting] = useState(false);
+
+  const loadRadar = useCallback(async () => {
+    try {
+      const [statusResponse, jobsResponse] = await Promise.all([
+        fetch("/api/system/status", { cache: "no-store" }),
+        fetch("/api/jobs", { cache: "no-store" }),
+      ]);
+      const status = (await statusResponse.json()) as SystemStatus;
+      const jobs = (await jobsResponse.json()) as JobsResponse;
+
+      if (!statusResponse.ok || !jobsResponse.ok) {
+        throw new Error(jobs.error || "레이더 저장소에 연결하지 못했습니다.");
+      }
+
+      setSystem(status);
+      setLastRun(jobs.lastRun);
+      if (jobs.items.length > 0) {
+        setCandidates(jobs.items);
+        setActiveId((current) =>
+          jobs.items.some((candidate) => candidate.id === current)
+            ? current
+            : jobs.items[0].id,
+        );
+        setDataMode("live");
+      } else {
+        setCandidates(sampleCandidates);
+        setActiveId(sampleCandidates[0].id);
+        setDataMode("sample");
+      }
+    } catch (error) {
+      setDataMode("error");
+      setNotice(error instanceof Error ? error.message : "데이터를 불러오지 못했습니다.");
+    }
+  }, []);
+
+  useEffect(() => {
+    const timer = window.setTimeout(() => void loadRadar(), 0);
+    return () => window.clearTimeout(timer);
+  }, [loadRadar]);
 
   const active =
     candidates.find((candidate) => candidate.id === activeId) ?? candidates[0];
@@ -60,19 +140,79 @@ export function RadarDashboard() {
     [candidates],
   );
 
-  function decide(status: ReviewStatus) {
+  async function decide(status: ReviewStatus) {
+    const previousStatus = active.status;
+    setNotice(null);
     setCandidates((current) =>
       current.map((candidate) =>
         candidate.id === active.id ? { ...candidate, status } : candidate,
       ),
     );
 
+    if (active.persisted) {
+      const response = await fetch(`/api/jobs/${encodeURIComponent(active.id)}/decision`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ decision: status }),
+      });
+      if (!response.ok) {
+        const payload = (await response.json().catch(() => ({}))) as { error?: string };
+        setCandidates((current) =>
+          current.map((candidate) =>
+            candidate.id === active.id
+              ? { ...candidate, status: previousStatus }
+              : candidate,
+          ),
+        );
+        setNotice(payload.error || "검수 결정을 저장하지 못했습니다.");
+        return;
+      }
+    }
+
     const next = candidates.find(
-      (candidate) =>
-        candidate.id !== active.id && candidate.status === "pending",
+      (candidate) => candidate.id !== active.id && candidate.status === "pending",
     );
     if (next) setActiveId(next.id);
   }
+
+  async function collectSaramin() {
+    setIsCollecting(true);
+    setNotice(null);
+    try {
+      const response = await fetch("/api/collectors/saramin", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ keyword: "한국어" }),
+      });
+      const payload = (await response.json()) as {
+        error?: string;
+        inserted?: number;
+        merged?: number;
+      };
+      if (!response.ok) throw new Error(payload.error || "사람인 수집에 실패했습니다.");
+
+      setNotice(
+        `사람인 수집 완료 · 신규 ${payload.inserted ?? 0}건 · 병합 ${payload.merged ?? 0}건`,
+      );
+      await loadRadar();
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "사람인 수집에 실패했습니다.");
+    } finally {
+      setIsCollecting(false);
+    }
+  }
+
+  const isSample = dataMode !== "live";
+  const statusCopy =
+    dataMode === "loading"
+      ? "저장소 연결 확인 중"
+      : dataMode === "live"
+        ? `마지막 수집 ${collectionTime(lastRun)}`
+        : dataMode === "error"
+          ? "저장소 연결 오류 · 샘플 표시"
+          : system.saraminConfigured
+            ? "수집 이력 없음 · 샘플 표시"
+            : "사람인 API 키 대기 · 샘플 표시";
 
   return (
     <main className="radar-shell">
@@ -86,17 +226,30 @@ export function RadarDashboard() {
             <h1>Opportunity Radar</h1>
           </div>
         </div>
-        <div className="system-state">
-          <span aria-hidden="true" />
-          마지막 수집 08:00 · 샘플 데이터
+        <div className="topbar-actions">
+          <div className={`system-state ${dataMode === "error" ? "is-error" : ""}`}>
+            <span aria-hidden="true" />
+            {statusCopy}
+          </div>
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() => void collectSaramin()}
+            disabled={!system.saraminConfigured || isCollecting}
+          >
+            {isCollecting ? <LoaderCircle className="spin" /> : <RefreshCw />}
+            사람인 수집
+          </Button>
         </div>
       </header>
+
+      {notice ? <div className="system-notice" role="status">{notice}</div> : null}
 
       <section className="workspace" aria-label="채용공고 검수 화면">
         <aside className="queue-panel">
           <div className="panel-heading">
             <div>
-              <p className="eyebrow">TODAY</p>
+              <p className="eyebrow">{isSample ? "DEMO" : "TODAY"}</p>
               <h2>검토 대기</h2>
             </div>
             <Badge className="queue-badge">{pending.length}</Badge>
@@ -137,15 +290,14 @@ export function RadarDashboard() {
         </aside>
 
         <section className="review-panel">
-          <div className="metrics-grid" aria-label="오늘의 수집 현황">
-            <Metric label="신규 발견" value="326" />
-            <Metric label="중복 제거" value="104" />
-            <Metric label="AI 선별" value="41" />
+          <div className="metrics-grid" aria-label="최근 수집 현황">
             <Metric
-              label="채택"
-              value={String(accepted)}
-              tone="metric-green"
+              label={isSample ? "샘플 공고" : "신규 발견"}
+              value={String(isSample ? candidates.length : lastRun?.storedCount ?? candidates.length)}
             />
+            <Metric label="출처 병합" value={String(isSample ? 0 : lastRun?.mergedCount ?? 0)} />
+            <Metric label="검토 대기" value={String(pending.length)} />
+            <Metric label="채택" value={String(accepted)} tone="metric-green" />
           </div>
 
           <article className="job-card">
@@ -166,11 +318,15 @@ export function RadarDashboard() {
               <p className="job-summary">{active.summary}</p>
 
               <div className="keyword-row" aria-label="일치 키워드">
-                {active.matchedKeywords.map((keyword) => (
-                  <Badge variant="outline" key={keyword}>
-                    #{keyword}
-                  </Badge>
-                ))}
+                {active.matchedKeywords.length > 0 ? (
+                  active.matchedKeywords.map((keyword) => (
+                    <Badge variant="outline" key={keyword}>
+                      #{keyword}
+                    </Badge>
+                  ))
+                ) : (
+                  <Badge variant="outline">#공고본문 일치</Badge>
+                )}
               </div>
 
               <div className="source-row">
@@ -179,14 +335,19 @@ export function RadarDashboard() {
                   <span>원천 공고</span>
                   <strong>{active.source}</strong>
                 </div>
-                <Button variant="ghost" size="sm" disabled>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  disabled={!active.sourceUrl}
+                  onClick={() => active.sourceUrl && window.open(active.sourceUrl, "_blank", "noopener,noreferrer")}
+                >
                   원문 보기 <ArrowUpRight />
                 </Button>
               </div>
             </div>
 
-            <aside className="score-panel" aria-label="Dreamdurim 적합도">
-              <p>Dreamdurim 적합도</p>
+            <aside className="score-panel" aria-label="Dreamdurim 사전 적합도">
+              <p>규칙 기반 사전 적합도</p>
               <div className="score-number">
                 <strong>{active.score}</strong>
                 <span>/100</span>
@@ -194,13 +355,13 @@ export function RadarDashboard() {
               <Progress value={active.score} />
               <ul>
                 <li>
-                  <Check /> 한국어 역량 직접 요구
+                  <Check /> 타깃 키워드 {active.matchedKeywords.length}개 일치
                 </li>
                 <li>
-                  <Check /> 한중 커리어 연관성
+                  <Check /> {active.sourceKind === "official-api" ? "공식 API 출처" : "기업 원천 출처"}
                 </li>
                 <li>
-                  <Check /> 공식 원천 확인
+                  <Check /> AI 정밀 평가는 채택 후 진행
                 </li>
               </ul>
             </aside>
@@ -212,16 +373,13 @@ export function RadarDashboard() {
               <span>채택한 공고만 다음 AI 가공 단계로 이동합니다.</span>
             </div>
             <div className="decision-actions">
-              <Button variant="outline" onClick={() => decide("excluded")}>
+              <Button variant="outline" onClick={() => void decide("excluded")}>
                 <X /> 제외
               </Button>
-              <Button variant="secondary" onClick={() => decide("later")}>
+              <Button variant="secondary" onClick={() => void decide("later")}>
                 <Clock3 /> 나중에 보기
               </Button>
-              <Button
-                className="accept-button"
-                onClick={() => decide("accepted")}
-              >
+              <Button className="accept-button" onClick={() => void decide("accepted")}>
                 <Check /> 채택
               </Button>
             </div>
